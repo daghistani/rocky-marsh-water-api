@@ -1,7 +1,14 @@
 export default async function handler(req, res) {
   const SITE = "USGS-01618100";
 
-  // Drop obvious admin / non-display / metadata-style fields
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   const EXCLUDE_EXACT = new Set([
     "NWIS lot number",
     "Sample location",
@@ -146,13 +153,10 @@ export default async function handler(req, res) {
     const parameters = Object.entries(grouped).map(([characteristic, values]) => {
       values.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-      const latest = values[0];
-      const group = latest.group;
-
       return {
         characteristic,
-        group,
-        latest,
+        group: values[0].group,
+        latest: values[0],
         count: values.length,
         series: values
       };
@@ -160,7 +164,7 @@ export default async function handler(req, res) {
 
     parameters.sort((a, b) => new Date(b.latest.date) - new Date(a.latest.date));
 
-    res.status(200).json({
+    return res.status(200).json({
       site: SITE,
       sampleCount: cleaned.length,
       parameterCount: parameters.length,
@@ -168,6 +172,6 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 }
