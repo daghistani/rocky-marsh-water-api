@@ -29,11 +29,11 @@ export default async function handler(req, res) {
 
   function parseCsv(text) {
     const lines = String(text || "").trim().split(/\r?\n/).filter(Boolean);
-    if (!lines.length) return { headers: [], rows: [] };
+    if (!lines.length) return [];
 
     const headers = parseCsvLine(lines[0]).map(h => h.trim());
 
-    const rows = lines.slice(1).map(line => {
+    return lines.slice(1).map(line => {
       const cols = parseCsvLine(line);
       const row = {};
       headers.forEach((h, i) => {
@@ -41,8 +41,12 @@ export default async function handler(req, res) {
       });
       return row;
     });
+  }
 
-    return { headers, rows };
+  function toNumber(v) {
+    if (!v) return null;
+    const n = Number(String(v).replace(/,/g, "").trim());
+    return Number.isFinite(n) ? n : null;
   }
 
   try {
@@ -52,22 +56,52 @@ export default async function handler(req, res) {
     const upstream = await fetch(url, { cache: "no-store" });
 
     if (!upstream.ok) {
-      return res.status(502).json({ error: `Upstream request failed (${upstream.status})` });
+      return res.status(502).json({ error: `Upstream failed (${upstream.status})` });
     }
 
     const csvText = await upstream.text();
-    const { headers, rows } = parseCsv(csvText);
+    const rows = parseCsv(csvText);
 
-    return res.status(200).json({
+    const cleaned = rows.map(r => {
+      const value = toNumber(r["Result_Measure"]);
+      if (value === null) return null;
+
+      const date = new Date(r["Activity_StartDate"]);
+      if (isNaN(date)) return null;
+
+      return {
+        characteristic: r["Result_Characteristic"] || "Unknown",
+        value,
+        unit: r["Result_MeasureUnit"] || "",
+        date: date.toISOString()
+      };
+    }).filter(Boolean);
+
+    const grouped = {};
+    for (const row of cleaned) {
+      if (!grouped[row.characteristic]) grouped[row.characteristic] = [];
+      grouped[row.characteristic].push(row);
+    }
+
+    const parameters = Object.entries(grouped).map(([name, values]) => {
+      values.sort((a, b) => new Date(b.date) - new Date(a.date));
+      return {
+        characteristic: name,
+        latest: values[0],
+        count: values.length
+      };
+    });
+
+    parameters.sort((a, b) => new Date(b.latest.date) - new Date(a.latest.date));
+
+    res.status(200).json({
       site: SITE,
-      rowCount: rows.length,
-      headerCount: headers.length,
-      headers: headers,
-      firstRow: rows[0] || null
+      sampleCount: cleaned.length,
+      parameterCount: parameters.length,
+      parameters: parameters.slice(0, 12)
     });
-  } catch (error) {
-    return res.status(500).json({
-      error: error instanceof Error ? error.message : "Unknown server error"
-    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 }
