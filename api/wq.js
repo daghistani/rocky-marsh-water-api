@@ -1,6 +1,61 @@
 export default async function handler(req, res) {
   const SITE = "USGS-01618100";
 
+  // Drop obvious admin / non-display / metadata-style fields
+  const EXCLUDE_EXACT = new Set([
+    "NWIS lot number",
+    "Sample location",
+    "Height, gage",
+    "Barometric pressure"
+  ]);
+
+  const EXCLUDE_CONTAINS = [
+    "lot number",
+    "gage",
+    "sample location",
+    "barometric pressure"
+  ];
+
+  function shouldKeepCharacteristic(name) {
+    if (!name) return false;
+
+    const normalized = String(name).trim();
+    const lower = normalized.toLowerCase();
+
+    if (EXCLUDE_EXACT.has(normalized)) return false;
+    if (EXCLUDE_CONTAINS.some(term => lower.includes(term))) return false;
+
+    return true;
+  }
+
+  function inferGroup(name) {
+    const n = String(name || "").toLowerCase();
+
+    if (
+      n.includes("nitrate") ||
+      n.includes("nitrite") ||
+      n.includes("nitrogen") ||
+      n.includes("phosphorus") ||
+      n.includes("orthophosphate") ||
+      n.includes("ammonia")
+    ) return "nutrient";
+
+    if (
+      n.includes("sediment") ||
+      n.includes("turbidity")
+    ) return "sediment";
+
+    if (
+      n.includes("temperature") ||
+      n.includes("conductance") ||
+      n === "ph" ||
+      n.includes("dissolved oxygen") ||
+      n.includes("oxygen")
+    ) return "physical";
+
+    return "other";
+  }
+
   function parseCsvLine(line) {
     const out = [];
     let cur = "";
@@ -44,7 +99,7 @@ export default async function handler(req, res) {
   }
 
   function toNumber(v) {
-    if (!v) return null;
+    if (v === null || v === undefined || v === "") return null;
     const n = Number(String(v).replace(/,/g, "").trim());
     return Number.isFinite(n) ? n : null;
   }
@@ -63,16 +118,21 @@ export default async function handler(req, res) {
     const rows = parseCsv(csvText);
 
     const cleaned = rows.map(r => {
+      const characteristic = (r["Result_Characteristic"] || "").trim();
+      if (!shouldKeepCharacteristic(characteristic)) return null;
+
       const value = toNumber(r["Result_Measure"]);
       if (value === null) return null;
 
-      const date = new Date(r["Activity_StartDate"]);
+      const rawDate = r["Activity_StartDate"];
+      const date = new Date(rawDate);
       if (isNaN(date)) return null;
 
       return {
-        characteristic: r["Result_Characteristic"] || "Unknown",
+        characteristic,
+        group: inferGroup(characteristic),
         value,
-        unit: r["Result_MeasureUnit"] || "",
+        unit: (r["Result_MeasureUnit"] || "").trim(),
         date: date.toISOString()
       };
     }).filter(Boolean);
@@ -83,12 +143,18 @@ export default async function handler(req, res) {
       grouped[row.characteristic].push(row);
     }
 
-    const parameters = Object.entries(grouped).map(([name, values]) => {
+    const parameters = Object.entries(grouped).map(([characteristic, values]) => {
       values.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+      const latest = values[0];
+      const group = latest.group;
+
       return {
-        characteristic: name,
-        latest: values[0],
-        count: values.length
+        characteristic,
+        group,
+        latest,
+        count: values.length,
+        series: values
       };
     });
 
@@ -98,7 +164,7 @@ export default async function handler(req, res) {
       site: SITE,
       sampleCount: cleaned.length,
       parameterCount: parameters.length,
-      parameters: parameters.slice(0, 12)
+      parameters
     });
 
   } catch (err) {
