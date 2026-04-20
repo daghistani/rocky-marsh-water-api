@@ -125,7 +125,10 @@ function parseCsv(text) {
       if (ch === "\r" && next === "\n") i++;
       row.push(cell);
       cell = "";
-      if (row.some((x) => String(x).trim() !== "")) rows.push(row);
+
+      if (row.some((x) => String(x).trim() !== "")) {
+        rows.push(row);
+      }
       row = [];
       continue;
     }
@@ -135,7 +138,9 @@ function parseCsv(text) {
 
   if (cell.length || row.length) {
     row.push(cell);
-    if (row.some((x) => String(x).trim() !== "")) rows.push(row);
+    if (row.some((x) => String(x).trim() !== "")) {
+      rows.push(row);
+    }
   }
 
   if (!rows.length) return [];
@@ -153,29 +158,32 @@ function parseCsv(text) {
 function detectHeaders(headers) {
   return {
     characteristic: findHeader(headers, [
-      "characteristicname",
-      "resultcharacteristicname"
+      "resultcharacteristic",
+      "resultcharacteristicname",
+      "characteristicname"
     ]),
     value: findHeader(headers, [
+      "resultmeasure",
       "resultmeasurevalue",
-      "measurevalue",
-      "resultmeasure"
+      "measurevalue"
     ]),
     unit: findHeader(headers, [
-      "resultmeasuremeasureunitcode",
+      "resultmeasureunit",
       "resultmeasureunitcode",
-      "measureunitcode",
-      "resultmeasureunit"
+      "resultmeasuremeasureunitcode",
+      "measureunitcode"
     ]),
     date: findHeader(headers, [
       "activitystartdate",
       "activitystartdatetime"
     ]),
     fraction: findHeader(headers, [
+      "resultsamplefraction",
       "resultsamplefractiontext",
       "samplefractiontext"
     ]),
     methodSpec: findHeader(headers, [
+      "resultmethodspeciation",
       "methodspecificationname",
       "resultchemicalformtext",
       "methodspeciation"
@@ -389,8 +397,7 @@ function normalizeHeader(str) {
 }
 
 function normalizeUnit(unit) {
-  const u = String(unit || "").trim();
-  return u === "uS/cm" ? "uS/cm" : u;
+  return String(unit || "").trim();
 }
 
 function parseDateOnly(value) {
