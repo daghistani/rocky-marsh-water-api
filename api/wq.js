@@ -10,7 +10,7 @@ export default async function handler(req, res) {
   try {
     const site = "USGS-01618100";
 
-    const url =
+    const sourceUrl =
       "https://www.waterqualitydata.us/wqx3/Result/search" +
       `?siteid=${encodeURIComponent(site)}` +
       "&dataProfile=basicPhysChem" +
@@ -18,7 +18,7 @@ export default async function handler(req, res) {
       "&count=no" +
       `&_=${Date.now()}`;
 
-    const upstream = await fetch(url, {
+    const upstream = await fetch(sourceUrl, {
       headers: { Accept: "text/csv" },
       cache: "no-store"
     });
@@ -37,7 +37,13 @@ export default async function handler(req, res) {
       throw new Error("No rows parsed from WQX3 CSV");
     }
 
-    const cleaned = parsed.map(normalizeRow).filter(Boolean);
+    const headers = Object.keys(parsed[0] || {});
+    const headerMap = detectHeaders(headers);
+
+    const cleaned = parsed
+      .map((row) => normalizeRow(row, headerMap))
+      .filter(Boolean);
+
     const grouped = buildCanonicalParameters(cleaned);
 
     const parameters = Object.values(grouped)
@@ -69,10 +75,18 @@ export default async function handler(req, res) {
     res.status(200).json({
       site,
       generatedAt: new Date().toISOString(),
-      sourceUrl: url,
+      sourceUrl,
       latestDate: parameters.length ? parameters[0].latest.date : null,
       parameterCount: parameters.length,
-      parameters
+      parameters,
+      debug: parameters.length
+        ? undefined
+        : {
+            headers,
+            detectedHeaders: headerMap,
+            parsedRowCount: parsed.length,
+            cleanedRowCount: cleaned.length
+          }
     });
   } catch (err) {
     res.status(500).json({
@@ -136,77 +150,78 @@ function parseCsv(text) {
   });
 }
 
-function normalizeRow(r) {
-  const characteristic =
-    pickFuzzy(r, [
-      "CharacteristicName",
-      "Result_CharacteristicName",
-      "Characteristic Name",
-      "ResultCharacteristicName"
-    ]) || "";
+function detectHeaders(headers) {
+  return {
+    characteristic: findHeader(headers, [
+      "characteristicname",
+      "resultcharacteristicname"
+    ]),
+    value: findHeader(headers, [
+      "resultmeasurevalue",
+      "measurevalue",
+      "resultmeasure"
+    ]),
+    unit: findHeader(headers, [
+      "resultmeasuremeasureunitcode",
+      "resultmeasureunitcode",
+      "measureunitcode",
+      "resultmeasureunit"
+    ]),
+    date: findHeader(headers, [
+      "activitystartdate",
+      "activitystartdatetime"
+    ]),
+    fraction: findHeader(headers, [
+      "resultsamplefractiontext",
+      "samplefractiontext"
+    ]),
+    methodSpec: findHeader(headers, [
+      "methodspecificationname",
+      "resultchemicalformtext",
+      "methodspeciation"
+    ]),
+    pcode: findHeader(headers, [
+      "usgspcode",
+      "pcode"
+    ])
+  };
+}
 
+function findHeader(headers, preferredNormalizedNames) {
+  const normalized = headers.map((h) => ({
+    original: h,
+    normalized: normalizeHeader(h)
+  }));
+
+  for (const target of preferredNormalizedNames) {
+    const exact = normalized.find((h) => h.normalized === target);
+    if (exact) return exact.original;
+  }
+
+  for (const target of preferredNormalizedNames) {
+    const fuzzy = normalized.find((h) => h.normalized.includes(target));
+    if (fuzzy) return fuzzy.original;
+  }
+
+  return null;
+}
+
+function normalizeRow(row, headerMap) {
+  const characteristic = get(row, headerMap.characteristic);
   if (!characteristic) return null;
 
-  const valueRaw = pickFuzzy(r, [
-    "ResultMeasureValue",
-    "Result_MeasureMeasureValue",
-    "Result Measure Value",
-    "MeasureValue",
-    "Result_Measure",
-    "value"
-  ]);
-
+  const valueRaw = get(row, headerMap.value);
   const value = Number(String(valueRaw).trim());
   if (!Number.isFinite(value)) return null;
 
-  const unit =
-    pickFuzzy(r, [
-      "ResultMeasure/MeasureUnitCode",
-      "Result_MeasureUnitCode",
-      "Result Measure/Measure Unit Code",
-      "MeasureUnitCode",
-      "Result_MeasureUnit",
-      "unit"
-    ]) || "";
-
-  const dateRaw =
-    pickFuzzy(r, [
-      "ActivityStartDate",
-      "Activity_StartDate",
-      "Activity Start Date",
-      "ActivityStartDateTime",
-      "Activity_StartDateTime",
-      "date"
-    ]) || "";
-
+  const unit = get(row, headerMap.unit) || "";
+  const dateRaw = get(row, headerMap.date) || "";
   const date = parseDateOnly(dateRaw);
   if (!date) return null;
 
-  const fraction =
-    pickFuzzy(r, [
-      "ResultSampleFractionText",
-      "Result_SampleFractionText",
-      "Result Sample Fraction Text",
-      "SampleFractionText"
-    ]) || "";
-
-  const chemicalForm =
-    pickFuzzy(r, [
-      "ResultChemicalFormText",
-      "Result_ChemicalFormText",
-      "Result Chemical Form Text",
-      "ChemicalFormText",
-      "MethodSpeciation",
-      "Result_MethodSpeciation"
-    ]) || "";
-
-  const pcode =
-    pickFuzzy(r, [
-      "USGSPCode",
-      "USGS PCode",
-      "PCode",
-      "USGSpcode"
-    ]) || "";
+  const fraction = get(row, headerMap.fraction) || "";
+  const methodSpec = get(row, headerMap.methodSpec) || "";
+  const pcode = get(row, headerMap.pcode) || "";
 
   const lowerName = String(characteristic).toLowerCase().trim();
 
@@ -221,15 +236,14 @@ function normalizeRow(r) {
   }
 
   return {
-    raw: r,
-    characteristic,
+    characteristic: String(characteristic).trim(),
     characteristicLower: lowerName,
     value,
     unit: normalizeUnit(unit),
     date,
-    fraction,
-    chemicalForm,
-    pcode
+    fraction: String(fraction).trim(),
+    methodSpec: String(methodSpec).trim(),
+    pcode: String(pcode).trim()
   };
 }
 
@@ -271,9 +285,9 @@ function buildCanonicalParameters(rows) {
       group: "nutrient",
       test: (r) => r.characteristicLower === "phosphorus",
       prefer: (r) =>
-        bonusContains(r.fraction, "unfiltered") +
-        bonusContains(r.chemicalForm, "as p") +
-        bonusPcode(r.pcode, ["00665"])
+        scoreContains(r.fraction, "unfiltered") +
+        scoreContains(r.methodSpec, "as p") +
+        scorePcode(r.pcode, ["00665"])
     },
     {
       key: "nitrate",
@@ -281,8 +295,8 @@ function buildCanonicalParameters(rows) {
       group: "nutrient",
       test: (r) => r.characteristicLower === "nitrate",
       prefer: (r) =>
-        bonusContains(r.chemicalForm, "as n") +
-        bonusPcode(r.pcode, ["00618"])
+        scoreContains(r.methodSpec, "as n") +
+        scorePcode(r.pcode, ["00618"])
     },
     {
       key: "nitrite",
@@ -290,8 +304,8 @@ function buildCanonicalParameters(rows) {
       group: "nutrient",
       test: (r) => r.characteristicLower === "nitrite",
       prefer: (r) =>
-        bonusContains(r.chemicalForm, "as n") +
-        bonusPcode(r.pcode, ["00613"])
+        scoreContains(r.methodSpec, "as n") +
+        scorePcode(r.pcode, ["00613"])
     },
     {
       key: "inorganic_nitrogen",
@@ -299,8 +313,8 @@ function buildCanonicalParameters(rows) {
       group: "nutrient",
       test: (r) => r.characteristicLower.includes("inorganic nitrogen"),
       prefer: (r) =>
-        bonusContains(r.chemicalForm, "as n") +
-        bonusPcode(r.pcode, ["00630"])
+        scoreContains(r.methodSpec, "as n") +
+        scorePcode(r.pcode, ["00630"])
     },
     {
       key: "total_nitrogen",
@@ -309,9 +323,9 @@ function buildCanonicalParameters(rows) {
       group: "nutrient",
       test: (r) => r.characteristicLower.includes("mixed forms"),
       prefer: (r) =>
-        bonusContains(r.fraction, "unfiltered") +
-        bonusContains(r.chemicalForm, "as n") +
-        bonusPcode(r.pcode, ["00625"])
+        scoreContains(r.fraction, "unfiltered") +
+        scoreContains(r.methodSpec, "as n") +
+        scorePcode(r.pcode, ["00625"])
     },
     {
       key: "turbidity",
@@ -362,27 +376,10 @@ function buildCanonicalParameters(rows) {
   return out;
 }
 
-function pickFuzzy(obj, candidates) {
-  const keys = Object.keys(obj);
-
-  for (const candidate of candidates) {
-    if (obj[candidate] !== undefined && String(obj[candidate]).trim() !== "") {
-      return obj[candidate];
-    }
-  }
-
-  const normalizedCandidates = candidates.map(normalizeHeader);
-
-  for (const key of keys) {
-    const nk = normalizeHeader(key);
-    const idx = normalizedCandidates.indexOf(nk);
-    if (idx !== -1) {
-      const val = obj[key];
-      if (val !== undefined && String(val).trim() !== "") return val;
-    }
-  }
-
-  return "";
+function get(obj, key) {
+  if (!key) return "";
+  const value = obj[key];
+  return value === undefined || value === null ? "" : String(value).trim();
 }
 
 function normalizeHeader(str) {
@@ -410,10 +407,10 @@ function toIsoMidnightUtc(date) {
   return `${formatDateOnly(date)}T00:00:00.000Z`;
 }
 
-function bonusContains(text, needle) {
+function scoreContains(text, needle) {
   return String(text || "").toLowerCase().includes(String(needle).toLowerCase()) ? 100 : 0;
 }
 
-function bonusPcode(pcode, preferred) {
+function scorePcode(pcode, preferred) {
   return preferred.includes(String(pcode || "").trim()) ? 100 : 0;
 }
