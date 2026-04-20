@@ -10,51 +10,44 @@ export default async function handler(req, res) {
   try {
     const site = "USGS-01618100";
 
-    // Use WQP beta because it includes more recent USGS data additions.
     const url =
-      "https://www.waterqualitydata.us/beta/data/Result/search" +
-      `?siteid=${encodeURIComponent(site)}` +
-      "&mimeType=csv" +
-      "&sorted=no" +
+      "https://api.waterdata.usgs.gov/samples-data/results/fullphyschem" +
+      `?mimeType=text/csv&monitoringLocationIdentifier=${encodeURIComponent(site)}` +
       `&cacheBust=${Date.now()}`;
 
     const upstream = await fetch(url, {
-      headers: {
-        Accept: "text/csv"
-      }
+      headers: { Accept: "text/csv" },
+      cache: "no-store"
     });
 
     if (!upstream.ok) {
-      throw new Error(`Upstream request failed: ${upstream.status}`);
+      throw new Error(`USGS Samples API request failed: ${upstream.status}`);
     }
 
     const csv = await upstream.text();
     if (!csv || !csv.trim()) {
-      throw new Error("Upstream returned empty CSV");
+      throw new Error("USGS Samples API returned empty CSV");
     }
 
-    const rows = parseCsv(csv);
-    if (!rows.length) {
-      throw new Error("No rows parsed from upstream CSV");
+    const parsed = parseCsv(csv);
+    if (!parsed.length) {
+      throw new Error("No rows parsed from USGS Samples API CSV");
     }
 
-    const cleaned = rows
-      .map(normalizeRow)
-      .filter(Boolean);
-
+    const cleaned = parsed.map(normalizeRow).filter(Boolean);
     const grouped = buildCanonicalParameters(cleaned);
 
     const parameters = Object.values(grouped)
       .map((item) => {
         const series = item.rows
           .filter((r) => Number.isFinite(r.value) && r.date)
-          .sort((a, b) => compareDateDesc(a.date, b.date))
+          .sort((a, b) => b.date.getTime() - a.date.getTime())
           .map((r) => ({
             characteristic: item.displayCharacteristic,
             group: item.group,
             value: r.value,
             unit: r.unit || "",
-            date: toIsoDateOnlyUtc(r.date)
+            date: toIsoMidnightUtc(r.date)
           }));
 
         if (!series.length) return null;
@@ -68,14 +61,12 @@ export default async function handler(req, res) {
         };
       })
       .filter(Boolean)
-      .sort((a, b) => compareDateDesc(a.latest.date, b.latest.date));
-
-    const latestDate = parameters.length ? parameters[0].latest.date : null;
+      .sort((a, b) => new Date(b.latest.date) - new Date(a.latest.date));
 
     res.status(200).json({
       site,
       generatedAt: new Date().toISOString(),
-      latestDate,
+      latestDate: parameters.length ? parameters[0].latest.date : null,
       parameterCount: parameters.length,
       parameters
     });
@@ -116,10 +107,7 @@ function parseCsv(text) {
       if (ch === "\r" && next === "\n") i++;
       row.push(cell);
       cell = "";
-
-      if (row.some((x) => String(x).trim() !== "")) {
-        rows.push(row);
-      }
+      if (row.some((x) => String(x).trim() !== "")) rows.push(row);
       row = [];
       continue;
     }
@@ -129,9 +117,7 @@ function parseCsv(text) {
 
   if (cell.length || row.length) {
     row.push(cell);
-    if (row.some((x) => String(x).trim() !== "")) {
-      rows.push(row);
-    }
+    if (row.some((x) => String(x).trim() !== "")) rows.push(row);
   }
 
   if (!rows.length) return [];
@@ -149,14 +135,17 @@ function parseCsv(text) {
 function normalizeRow(r) {
   const characteristic =
     pick(r, [
+      "Result_Characteristic",
+      "Result_CharacteristicComparable",
+      "Result_CharacteristicUserSupplied",
       "CharacteristicName",
-      "characteristicName",
       "Characteristic Name"
     ]) || "";
 
   if (!characteristic) return null;
 
   const valueRaw = pick(r, [
+    "Result_Measure",
     "ResultMeasureValue",
     "Result Measure Value",
     "MeasureValue",
@@ -168,6 +157,7 @@ function normalizeRow(r) {
 
   const unit =
     pick(r, [
+      "Result_MeasureUnit",
       "ResultMeasure/MeasureUnitCode",
       "Result Measure/Measure Unit Code",
       "MeasureUnitCode",
@@ -176,6 +166,7 @@ function normalizeRow(r) {
 
   const dateRaw =
     pick(r, [
+      "Activity_StartDate",
       "ActivityStartDate",
       "Activity Start Date",
       "date"
@@ -186,6 +177,7 @@ function normalizeRow(r) {
 
   const fraction =
     pick(r, [
+      "Result_SampleFraction",
       "ResultSampleFractionText",
       "Result Sample Fraction Text",
       "SampleFractionText"
@@ -193,6 +185,7 @@ function normalizeRow(r) {
 
   const chemicalForm =
     pick(r, [
+      "Result_MethodSpeciation",
       "ResultChemicalFormText",
       "Result Chemical Form Text",
       "ChemicalFormText"
@@ -200,6 +193,7 @@ function normalizeRow(r) {
 
   const pcode =
     pick(r, [
+      "USGSpcode",
       "USGSPCode",
       "USGS PCode",
       "PCode"
@@ -207,23 +201,19 @@ function normalizeRow(r) {
 
   const detectionCondition =
     pick(r, [
+      "Result_ResultDetectionCondition",
       "ResultDetectionConditionText",
       "Result Detection Condition Text"
     ]) || "";
 
   const resultStatus =
     pick(r, [
+      "Result_MeasureStatusIdentifier",
       "ResultStatusIdentifier",
       "Result Status Identifier"
     ]) || "";
 
-  const comment =
-    pick(r, [
-      "ResultCommentText",
-      "Result Comment Text"
-    ]) || "";
-
-  const lowerName = characteristic.toLowerCase();
+  const lowerName = String(characteristic).toLowerCase().trim();
 
   if (
     lowerName.includes("lot number") ||
@@ -231,14 +221,6 @@ function normalizeRow(r) {
     lowerName.includes("gage height") ||
     lowerName.includes("streamflow") ||
     lowerName.includes("barometric pressure")
-  ) {
-    return null;
-  }
-
-  if (
-    detectionCondition &&
-    /not detected|below detection|present above quantification limit/i.test(detectionCondition) &&
-    !Number.isFinite(value)
   ) {
     return null;
   }
@@ -254,8 +236,7 @@ function normalizeRow(r) {
     chemicalForm,
     pcode,
     detectionCondition,
-    resultStatus,
-    comment
+    resultStatus
   };
 }
 
@@ -266,7 +247,7 @@ function buildCanonicalParameters(rows) {
       displayCharacteristic: "Temperature, water",
       group: "physical",
       test: (r) => r.characteristicLower === "temperature, water",
-      prefer: (r) => 100
+      prefer: () => 100
     },
     {
       key: "dissolved_oxygen",
@@ -275,21 +256,21 @@ function buildCanonicalParameters(rows) {
       test: (r) =>
         r.characteristicLower.includes("dissolved oxygen") ||
         r.characteristicLower.includes("oxygen, dissolved"),
-      prefer: (r) => 100
+      prefer: () => 100
     },
     {
       key: "specific_conductance",
       displayCharacteristic: "Specific conductance",
       group: "physical",
       test: (r) => r.characteristicLower.includes("specific conductance"),
-      prefer: (r) => 100
+      prefer: () => 100
     },
     {
       key: "ph",
       displayCharacteristic: "pH",
       group: "physical",
       test: (r) => r.characteristicLower === "ph",
-      prefer: (r) => 100
+      prefer: () => 100
     },
     {
       key: "phosphorus",
@@ -297,9 +278,9 @@ function buildCanonicalParameters(rows) {
       group: "nutrient",
       test: (r) => r.characteristicLower === "phosphorus",
       prefer: (r) =>
-        scoreContains(r.fraction, "unfiltered") +
-        scoreContains(r.chemicalForm, "as p") +
-        scorePcode(r.pcode, ["00665"]),
+        bonusContains(r.fraction, "unfiltered") +
+        bonusContains(r.chemicalForm, "as p") +
+        bonusPcode(r.pcode, ["00665"])
     },
     {
       key: "nitrate",
@@ -307,8 +288,8 @@ function buildCanonicalParameters(rows) {
       group: "nutrient",
       test: (r) => r.characteristicLower === "nitrate",
       prefer: (r) =>
-        scoreContains(r.chemicalForm, "as n") +
-        scorePcode(r.pcode, ["00618"]),
+        bonusContains(r.chemicalForm, "as n") +
+        bonusPcode(r.pcode, ["00618"])
     },
     {
       key: "nitrite",
@@ -316,8 +297,8 @@ function buildCanonicalParameters(rows) {
       group: "nutrient",
       test: (r) => r.characteristicLower === "nitrite",
       prefer: (r) =>
-        scoreContains(r.chemicalForm, "as n") +
-        scorePcode(r.pcode, ["00613"]),
+        bonusContains(r.chemicalForm, "as n") +
+        bonusPcode(r.pcode, ["00613"])
     },
     {
       key: "inorganic_nitrogen",
@@ -325,8 +306,8 @@ function buildCanonicalParameters(rows) {
       group: "nutrient",
       test: (r) => r.characteristicLower.includes("inorganic nitrogen"),
       prefer: (r) =>
-        scoreContains(r.chemicalForm, "as n") +
-        scorePcode(r.pcode, ["00630"]),
+        bonusContains(r.chemicalForm, "as n") +
+        bonusPcode(r.pcode, ["00630"])
     },
     {
       key: "total_nitrogen",
@@ -335,23 +316,23 @@ function buildCanonicalParameters(rows) {
       group: "nutrient",
       test: (r) => r.characteristicLower.includes("mixed forms"),
       prefer: (r) =>
-        scoreContains(r.fraction, "unfiltered") +
-        scoreContains(r.chemicalForm, "as n") +
-        scorePcode(r.pcode, ["00625"]),
+        bonusContains(r.fraction, "unfiltered") +
+        bonusContains(r.chemicalForm, "as n") +
+        bonusPcode(r.pcode, ["00625"])
     },
     {
       key: "turbidity",
       displayCharacteristic: "Turbidity",
       group: "sediment",
       test: (r) => r.characteristicLower.includes("turbidity"),
-      prefer: (r) => 100
+      prefer: () => 100
     },
     {
       key: "suspended_sediment_load",
       displayCharacteristic: "Suspended Sediment Load",
       group: "sediment",
       test: (r) => r.characteristicLower.includes("suspended sediment load"),
-      prefer: (r) => 100
+      prefer: () => 100
     }
   ];
 
@@ -364,16 +345,16 @@ function buildCanonicalParameters(rows) {
     const byDate = new Map();
 
     for (const row of matched) {
-      const dateKey = formatDateOnly(row.date);
-      const current = byDate.get(dateKey);
+      const key = formatDateOnly(row.date);
+      const existing = byDate.get(key);
 
-      if (!current || def.prefer(row) > def.prefer(current)) {
-        byDate.set(dateKey, row);
+      if (!existing || def.prefer(row) > def.prefer(existing)) {
+        byDate.set(key, row);
       }
     }
 
-    const canonicalRows = Array.from(byDate.values()).sort((a, b) =>
-      compareDateDesc(a.date, b.date)
+    const canonicalRows = Array.from(byDate.values()).sort(
+      (a, b) => b.date.getTime() - a.date.getTime()
     );
 
     if (!canonicalRows.length) continue;
@@ -389,9 +370,10 @@ function buildCanonicalParameters(rows) {
 }
 
 function pick(obj, keys) {
-  for (const k of keys) {
-    if (obj[k] !== undefined && obj[k] !== null && String(obj[k]).trim() !== "") {
-      return obj[k];
+  for (const key of keys) {
+    const val = obj[key];
+    if (val !== undefined && val !== null && String(val).trim() !== "") {
+      return val;
     }
   }
   return "";
@@ -399,33 +381,27 @@ function pick(obj, keys) {
 
 function normalizeUnit(unit) {
   const u = String(unit || "").trim();
-  if (u === "uS/cm") return "uS/cm";
-  return u;
+  return u === "uS/cm" ? "uS/cm" : u;
 }
 
-function parseDateOnly(s) {
-  const m = String(s || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+function parseDateOnly(value) {
+  const m = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return null;
   return new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
 }
 
-function formatDateOnly(d) {
-  return d.toISOString().slice(0, 10);
+function formatDateOnly(date) {
+  return date.toISOString().slice(0, 10);
 }
 
-function toIsoDateOnlyUtc(d) {
-  return `${formatDateOnly(d)}T00:00:00.000Z`;
+function toIsoMidnightUtc(date) {
+  return `${formatDateOnly(date)}T00:00:00.000Z`;
 }
 
-function compareDateDesc(a, b) {
-  return new Date(b).getTime() - new Date(a).getTime();
+function bonusContains(text, needle) {
+  return String(text || "").toLowerCase().includes(String(needle).toLowerCase()) ? 100 : 0;
 }
 
-function scoreContains(text, needle) {
-  const t = String(text || "").toLowerCase();
-  return t.includes(String(needle).toLowerCase()) ? 100 : 0;
-}
-
-function scorePcode(pcode, preferred) {
+function bonusPcode(pcode, preferred) {
   return preferred.includes(String(pcode || "").trim()) ? 100 : 0;
 }
