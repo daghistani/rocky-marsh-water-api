@@ -11,9 +11,12 @@ export default async function handler(req, res) {
     const site = "USGS-01618100";
 
     const url =
-      "https://api.waterdata.usgs.gov/samples-data/results/fullphyschem" +
-      `?mimeType=text/csv&monitoringLocationIdentifier=${encodeURIComponent(site)}` +
-      `&cacheBust=${Date.now()}`;
+      "https://www.waterqualitydata.us/wqx3/Result/search" +
+      `?siteid=${encodeURIComponent(site)}` +
+      "&dataProfile=basicPhysChem" +
+      "&mimeType=csv" +
+      "&count=no" +
+      `&_=${Date.now()}`;
 
     const upstream = await fetch(url, {
       headers: { Accept: "text/csv" },
@@ -21,17 +24,17 @@ export default async function handler(req, res) {
     });
 
     if (!upstream.ok) {
-      throw new Error(`USGS Samples API request failed: ${upstream.status}`);
+      throw new Error(`WQX3 request failed: ${upstream.status}`);
     }
 
     const csv = await upstream.text();
     if (!csv || !csv.trim()) {
-      throw new Error("USGS Samples API returned empty CSV");
+      throw new Error("WQX3 returned empty CSV");
     }
 
     const parsed = parseCsv(csv);
     if (!parsed.length) {
-      throw new Error("No rows parsed from USGS Samples API CSV");
+      throw new Error("No rows parsed from WQX3 CSV");
     }
 
     const cleaned = parsed.map(normalizeRow).filter(Boolean);
@@ -66,6 +69,7 @@ export default async function handler(req, res) {
     res.status(200).json({
       site,
       generatedAt: new Date().toISOString(),
+      sourceUrl: url,
       latestDate: parameters.length ? parameters[0].latest.date : null,
       parameterCount: parameters.length,
       parameters
@@ -134,21 +138,21 @@ function parseCsv(text) {
 
 function normalizeRow(r) {
   const characteristic =
-    pick(r, [
-      "Result_Characteristic",
-      "Result_CharacteristicComparable",
-      "Result_CharacteristicUserSupplied",
+    pickFuzzy(r, [
       "CharacteristicName",
-      "Characteristic Name"
+      "Result_CharacteristicName",
+      "Characteristic Name",
+      "ResultCharacteristicName"
     ]) || "";
 
   if (!characteristic) return null;
 
-  const valueRaw = pick(r, [
-    "Result_Measure",
+  const valueRaw = pickFuzzy(r, [
     "ResultMeasureValue",
+    "Result_MeasureMeasureValue",
     "Result Measure Value",
     "MeasureValue",
+    "Result_Measure",
     "value"
   ]);
 
@@ -156,19 +160,22 @@ function normalizeRow(r) {
   if (!Number.isFinite(value)) return null;
 
   const unit =
-    pick(r, [
-      "Result_MeasureUnit",
+    pickFuzzy(r, [
       "ResultMeasure/MeasureUnitCode",
+      "Result_MeasureUnitCode",
       "Result Measure/Measure Unit Code",
       "MeasureUnitCode",
+      "Result_MeasureUnit",
       "unit"
     ]) || "";
 
   const dateRaw =
-    pick(r, [
-      "Activity_StartDate",
+    pickFuzzy(r, [
       "ActivityStartDate",
+      "Activity_StartDate",
       "Activity Start Date",
+      "ActivityStartDateTime",
+      "Activity_StartDateTime",
       "date"
     ]) || "";
 
@@ -176,41 +183,29 @@ function normalizeRow(r) {
   if (!date) return null;
 
   const fraction =
-    pick(r, [
-      "Result_SampleFraction",
+    pickFuzzy(r, [
       "ResultSampleFractionText",
+      "Result_SampleFractionText",
       "Result Sample Fraction Text",
       "SampleFractionText"
     ]) || "";
 
   const chemicalForm =
-    pick(r, [
-      "Result_MethodSpeciation",
+    pickFuzzy(r, [
       "ResultChemicalFormText",
+      "Result_ChemicalFormText",
       "Result Chemical Form Text",
-      "ChemicalFormText"
+      "ChemicalFormText",
+      "MethodSpeciation",
+      "Result_MethodSpeciation"
     ]) || "";
 
   const pcode =
-    pick(r, [
-      "USGSpcode",
+    pickFuzzy(r, [
       "USGSPCode",
       "USGS PCode",
-      "PCode"
-    ]) || "";
-
-  const detectionCondition =
-    pick(r, [
-      "Result_ResultDetectionCondition",
-      "ResultDetectionConditionText",
-      "Result Detection Condition Text"
-    ]) || "";
-
-  const resultStatus =
-    pick(r, [
-      "Result_MeasureStatusIdentifier",
-      "ResultStatusIdentifier",
-      "Result Status Identifier"
+      "PCode",
+      "USGSpcode"
     ]) || "";
 
   const lowerName = String(characteristic).toLowerCase().trim();
@@ -234,9 +229,7 @@ function normalizeRow(r) {
     date,
     fraction,
     chemicalForm,
-    pcode,
-    detectionCondition,
-    resultStatus
+    pcode
   };
 }
 
@@ -369,14 +362,33 @@ function buildCanonicalParameters(rows) {
   return out;
 }
 
-function pick(obj, keys) {
-  for (const key of keys) {
-    const val = obj[key];
-    if (val !== undefined && val !== null && String(val).trim() !== "") {
-      return val;
+function pickFuzzy(obj, candidates) {
+  const keys = Object.keys(obj);
+
+  for (const candidate of candidates) {
+    if (obj[candidate] !== undefined && String(obj[candidate]).trim() !== "") {
+      return obj[candidate];
     }
   }
+
+  const normalizedCandidates = candidates.map(normalizeHeader);
+
+  for (const key of keys) {
+    const nk = normalizeHeader(key);
+    const idx = normalizedCandidates.indexOf(nk);
+    if (idx !== -1) {
+      const val = obj[key];
+      if (val !== undefined && String(val).trim() !== "") return val;
+    }
+  }
+
   return "";
+}
+
+function normalizeHeader(str) {
+  return String(str || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
 }
 
 function normalizeUnit(unit) {
