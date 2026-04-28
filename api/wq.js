@@ -37,13 +37,7 @@ export default async function handler(req, res) {
       throw new Error("No rows parsed from WQX3 CSV");
     }
 
-    const headers = Object.keys(parsed[0] || {});
-    const headerMap = detectHeaders(headers);
-
-    const cleaned = parsed
-      .map((row) => normalizeRow(row, headerMap))
-      .filter(Boolean);
-
+    const cleaned = parsed.map(normalizeRow).filter(Boolean);
     const grouped = buildCanonicalParameters(cleaned);
 
     const parameters = Object.values(grouped)
@@ -78,15 +72,7 @@ export default async function handler(req, res) {
       sourceUrl,
       latestDate: parameters.length ? parameters[0].latest.date : null,
       parameterCount: parameters.length,
-      parameters,
-      debug: parameters.length
-        ? undefined
-        : {
-            headers,
-            detectedHeaders: headerMap,
-            parsedRowCount: parsed.length,
-            cleanedRowCount: cleaned.length
-          }
+      parameters
     });
   } catch (err) {
     res.status(500).json({
@@ -155,83 +141,22 @@ function parseCsv(text) {
   });
 }
 
-function detectHeaders(headers) {
-  return {
-    characteristic: findHeader(headers, [
-      "resultcharacteristic",
-      "resultcharacteristicname",
-      "characteristicname"
-    ]),
-    value: findHeader(headers, [
-      "resultmeasure",
-      "resultmeasurevalue",
-      "measurevalue"
-    ]),
-    unit: findHeader(headers, [
-      "resultmeasureunit",
-      "resultmeasureunitcode",
-      "resultmeasuremeasureunitcode",
-      "measureunitcode"
-    ]),
-    date: findHeader(headers, [
-      "activitystartdate",
-      "activitystartdatetime"
-    ]),
-    fraction: findHeader(headers, [
-      "resultsamplefraction",
-      "resultsamplefractiontext",
-      "samplefractiontext"
-    ]),
-    methodSpec: findHeader(headers, [
-      "resultmethodspeciation",
-      "methodspecificationname",
-      "resultchemicalformtext",
-      "methodspeciation"
-    ]),
-    pcode: findHeader(headers, [
-      "usgspcode",
-      "pcode"
-    ])
-  };
-}
-
-function findHeader(headers, preferredNormalizedNames) {
-  const normalized = headers.map((h) => ({
-    original: h,
-    normalized: normalizeHeader(h)
-  }));
-
-  for (const target of preferredNormalizedNames) {
-    const exact = normalized.find((h) => h.normalized === target);
-    if (exact) return exact.original;
-  }
-
-  for (const target of preferredNormalizedNames) {
-    const fuzzy = normalized.find((h) => h.normalized.includes(target));
-    if (fuzzy) return fuzzy.original;
-  }
-
-  return null;
-}
-
-function normalizeRow(row, headerMap) {
-  const characteristic = get(row, headerMap.characteristic);
+function normalizeRow(row) {
+  const characteristic = String(row["Result_Characteristic"] || "").trim();
   if (!characteristic) return null;
 
-  const valueRaw = get(row, headerMap.value);
-  const value = Number(String(valueRaw).trim());
+  const value = Number(String(row["Result_Measure"] || "").trim());
   if (!Number.isFinite(value)) return null;
 
-  const unit = get(row, headerMap.unit) || "";
-  const dateRaw = get(row, headerMap.date) || "";
-  const date = parseDateOnly(dateRaw);
+  const unit = String(row["Result_MeasureUnit"] || "").trim();
+  const date = parseDateOnly(row["Activity_StartDate"]);
   if (!date) return null;
 
-  const fraction = get(row, headerMap.fraction) || "";
-  const methodSpec = get(row, headerMap.methodSpec) || "";
-  const pcode = get(row, headerMap.pcode) || "";
+  const fraction = String(row["Result_SampleFraction"] || "").trim();
+  const methodSpec = String(row["Result_MethodSpeciation"] || "").trim();
+  const pcode = String(row["USGSpcode"] || "").trim();
 
-  const lowerName = String(characteristic).toLowerCase().trim();
+  const lowerName = characteristic.toLowerCase().trim();
 
   if (
     lowerName.includes("lot number") ||
@@ -244,14 +169,14 @@ function normalizeRow(row, headerMap) {
   }
 
   return {
-    characteristic: String(characteristic).trim(),
+    characteristic,
     characteristicLower: lowerName,
     value,
-    unit: normalizeUnit(unit),
+    unit,
     date,
-    fraction: String(fraction).trim(),
-    methodSpec: String(methodSpec).trim(),
-    pcode: String(pcode).trim()
+    fraction,
+    methodSpec,
+    pcode
   };
 }
 
@@ -382,22 +307,6 @@ function buildCanonicalParameters(rows) {
   }
 
   return out;
-}
-
-function get(obj, key) {
-  if (!key) return "";
-  const value = obj[key];
-  return value === undefined || value === null ? "" : String(value).trim();
-}
-
-function normalizeHeader(str) {
-  return String(str || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, "");
-}
-
-function normalizeUnit(unit) {
-  return String(unit || "").trim();
 }
 
 function parseDateOnly(value) {
