@@ -1,5 +1,8 @@
 {
   "name": "rocky-marsh-water-api",
-  "version": "1.0.0",
-  "private": true
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@vercel/blob": "latest"
+  }
 }
